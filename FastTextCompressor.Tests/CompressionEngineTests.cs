@@ -35,6 +35,39 @@ public sealed class CompressionEngineTests
     }
 
     [Fact]
+    public async Task CompressionUsesBrotliFormatVersionTwo()
+    {
+        var engine = new CompressionEngine();
+        await using var compressed = new MemoryStream();
+        await using var input = new MemoryStream(Encoding.UTF8.GetBytes("repeat repeat repeat"));
+
+        await engine.CompressAsync(input, compressed);
+
+        Assert.Equal("FTCX"u8.ToArray(), compressed.ToArray()[..4]);
+        Assert.Equal(2, compressed.ToArray()[4]);
+    }
+
+    [Fact]
+    public async Task DecompressesLegacyVersionOnePayload()
+    {
+        await using var input = new MemoryStream();
+        input.Write("FTCX"u8);
+        input.WriteByte(1);
+        Write7BitEncodedInt(input, 2);
+        WriteToken(input, "Hello");
+        WriteToken(input, " world");
+        Write7BitEncodedInt(input, 0);
+        Write7BitEncodedInt(input, 1);
+        input.Position = 0;
+
+        var engine = new CompressionEngine();
+        await using var output = new MemoryStream();
+        await engine.DecompressAsync(input, output);
+
+        Assert.Equal("Hello world", Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    [Fact]
     public async Task RejectsInvalidMagic()
     {
         var engine = new CompressionEngine();
@@ -42,5 +75,24 @@ public sealed class CompressionEngineTests
         await using var output = new MemoryStream();
 
         await Assert.ThrowsAsync<InvalidDataException>(() => engine.DecompressAsync(input, output));
+    }
+
+    private static void WriteToken(Stream stream, string token)
+    {
+        var bytes = Encoding.UTF8.GetBytes(token);
+        Write7BitEncodedInt(stream, bytes.Length);
+        stream.Write(bytes);
+    }
+
+    private static void Write7BitEncodedInt(Stream stream, int value)
+    {
+        var remaining = (uint)value;
+        while (remaining >= 0x80)
+        {
+            stream.WriteByte((byte)(remaining | 0x80));
+            remaining >>= 7;
+        }
+
+        stream.WriteByte((byte)remaining);
     }
 }
