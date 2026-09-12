@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="FastTextCompressor.Cli/FastTextCompressor.Cli.csproj" />
+  <Project Path="FastTextCompressor.Core/FastTextCompressor.Core.csproj" />
+  <Project Path="FastTextCompressor.Tests/FastTextCompressor.Tests.csproj" />
+</Solution>
