@@ -26,6 +26,11 @@ internal static class BinaryPayload
                 throw new InvalidDataException("Unexpected end of compressed data.");
             }
 
+            if (shift == 28 && (next & 0xf0) != 0)
+            {
+                throw new InvalidDataException("Invalid 7-bit encoded integer.");
+            }
+
             result |= (next & 0x7f) << shift;
             if ((next & 0x80) == 0)
             {
@@ -55,6 +60,11 @@ internal static class BinaryPayload
             if (first < 0)
             {
                 throw new InvalidDataException("Unexpected end of compressed data.");
+            }
+
+            if (shift == 28 && (first & 0xf0) != 0)
+            {
+                throw new InvalidDataException("Invalid 7-bit encoded integer.");
             }
 
             value |= (first & 0x7f) << shift;

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Compression;
 using System.Text;
 
 namespace FastTextCompressor.Core;
@@ -6,7 +7,8 @@ namespace FastTextCompressor.Core;
 public sealed class CompressionEngine : ICompressor, IDecompressor
 {
     private static readonly byte[] Magic = "FTCX"u8.ToArray();
-    private const byte Version = 1;
+    private const byte LegacyVersion = 1;
+    private const byte Version = 2;
     private const int BufferSize = 64 * 1024;
 
     public async Task<CompressionResult> CompressAsync(
@@ -27,7 +29,8 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
         long processedBytes = 0;
         try
         {
-            await using (var payload = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, BufferSize, FileOptions.SequentialScan))
+            await using (var payloadFile = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, BufferSize, FileOptions.SequentialScan))
+            await using (var payload = new BufferedStream(payloadFile, BufferSize))
             using (var reader = new StreamReader(input, new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: true, BufferSize, leaveOpen: true))
             {
                 var buffer = ArrayPool<char>.Shared.Rent(BufferSize);
@@ -56,19 +59,28 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
                 }
             }
 
-            await using (var payload = new FileStream(temporaryPath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan))
+            var remap = dictionary.OrderByFrequency();
+            await using (var payloadFile = new FileStream(temporaryPath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan))
+            await using (var payload = new BufferedStream(payloadFile, BufferSize))
             {
                 output.Write(Magic);
                 output.WriteByte(Version);
-                BinaryPayload.Write7BitEncodedInt(output, dictionary.Count);
+                await using var compressed = new BrotliStream(output, CompressionLevel.Optimal, leaveOpen: true);
+                BinaryPayload.Write7BitEncodedInt(compressed, dictionary.Count);
                 foreach (var token in dictionary.Tokens)
                 {
                     var bytes = Encoding.UTF8.GetBytes(token);
-                    BinaryPayload.Write7BitEncodedInt(output, bytes.Length);
-                    output.Write(bytes);
+                    BinaryPayload.Write7BitEncodedInt(compressed, bytes.Length);
+                    compressed.Write(bytes);
                 }
 
-                await payload.CopyToAsync(output, BufferSize, cancellationToken);
+                while (BinaryPayload.TryRead7BitEncodedInt(payload, out var oldId))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    BinaryPayload.Write7BitEncodedInt(compressed, remap[oldId]);
+                }
+
+                await compressed.FlushAsync(cancellationToken);
             }
 
             if (output.CanSeek)
@@ -96,23 +108,43 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
         ArgumentNullException.ThrowIfNull(output);
         var magic = new byte[Magic.Length];
         await ReadExactlyAsync(input, magic, cancellationToken);
-        if (!magic.AsSpan().SequenceEqual(Magic) || input.ReadByte() != Version)
+        if (!magic.AsSpan().SequenceEqual(Magic))
         {
             throw new InvalidDataException("The input is not a supported FTCX file.");
         }
 
-        var count = BinaryPayload.Read7BitEncodedInt(input);
+        var version = input.ReadByte();
+        if (version is not LegacyVersion and not Version)
+        {
+            throw new InvalidDataException("The input is not a supported FTCX file.");
+        }
+
+        await using var body = version == Version
+            ? new BrotliStream(input, CompressionMode.Decompress, leaveOpen: true)
+            : null;
+        var payload = (Stream?)body ?? input;
+        var count = BinaryPayload.Read7BitEncodedInt(payload);
+        if (count < 0)
+        {
+            throw new InvalidDataException("Invalid dictionary entry count.");
+        }
+
         var dictionary = new string[count];
         for (var index = 0; index < count; index++)
         {
-            var byteCount = BinaryPayload.Read7BitEncodedInt(input);
+            var byteCount = BinaryPayload.Read7BitEncodedInt(payload);
+            if (byteCount < 0)
+            {
+                throw new InvalidDataException("Invalid dictionary entry length.");
+            }
+
             var bytes = new byte[byteCount];
-            await ReadExactlyAsync(input, bytes, cancellationToken);
+            await ReadExactlyAsync(payload, bytes, cancellationToken);
             dictionary[index] = Encoding.UTF8.GetString(bytes);
         }
 
         await using var writer = new StreamWriter(output, new UTF8Encoding(false), BufferSize, leaveOpen: true);
-        while (BinaryPayload.TryRead7BitEncodedInt(input, out var id))
+        while (BinaryPayload.TryRead7BitEncodedInt(payload, out var id))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if ((uint)id >= (uint)dictionary.Length)
