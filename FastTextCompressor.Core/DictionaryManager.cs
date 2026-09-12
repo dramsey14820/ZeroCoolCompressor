@@ -13,6 +13,11 @@ internal sealed class DictionaryManager
     public int GetOrAdd(ReadOnlySpan<char> token)
     {
         var value = token.ToString();
+        return GetOrAdd(value);
+    }
+
+    public int GetOrAdd(string value)
+    {
         if (_ids.TryGetValue(value, out var id))
         {
             _frequencies[id]++;

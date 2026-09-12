@@ -2,6 +2,18 @@ namespace FastTextCompressor.Core;
 
 internal static class BinaryPayload
 {
+    public static void Write7BitEncodedInt(Span<byte> buffer, ref int offset, int value)
+    {
+        uint remaining = (uint)value;
+        while (remaining >= 0x80)
+        {
+            buffer[offset++] = (byte)(remaining | 0x80);
+            remaining >>= 7;
+        }
+
+        buffer[offset++] = (byte)remaining;
+    }
+
     public static void Write7BitEncodedInt(Stream stream, int value)
     {
         uint remaining = (uint)value;

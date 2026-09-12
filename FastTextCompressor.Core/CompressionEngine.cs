@@ -40,7 +40,7 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
                     int read;
                     while ((read = await reader.ReadAsync(buffer.AsMemory(0, BufferSize), cancellationToken)) > 0)
                     {
-                        tokenizer.Process(buffer.AsSpan(0, read), isFinal: false, token =>
+                        tokenizer.ProcessStrings(buffer.AsSpan(0, read), isFinal: false, token =>
                         {
                             BinaryPayload.Write7BitEncodedInt(payload, dictionary.GetOrAdd(token));
                         });
@@ -48,7 +48,7 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
                         progress?.Report(new CompressionProgress(processedBytes, input.CanSeek ? input.Length : null));
                     }
 
-                    tokenizer.Process(ReadOnlySpan<char>.Empty, isFinal: true, token =>
+                    tokenizer.ProcessStrings(ReadOnlySpan<char>.Empty, isFinal: true, token =>
                     {
                         BinaryPayload.Write7BitEncodedInt(payload, dictionary.GetOrAdd(token));
                     });
@@ -74,10 +74,32 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
                     compressed.Write(bytes);
                 }
 
-                while (BinaryPayload.TryRead7BitEncodedInt(payload, out var oldId))
+                var encodedIds = ArrayPool<byte>.Shared.Rent(BufferSize);
+                try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    BinaryPayload.Write7BitEncodedInt(compressed, remap[oldId]);
+                    var encodedLength = 0;
+                    while (BinaryPayload.TryRead7BitEncodedInt(payload, out var oldId))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var newId = remap[oldId];
+                        var required = newId < 0x80 ? 1 : newId < 0x4000 ? 2 : newId < 0x200000 ? 3 : newId < 0x10000000 ? 4 : 5;
+                        if (encodedLength + required > encodedIds.Length)
+                        {
+                            compressed.Write(encodedIds, 0, encodedLength);
+                            encodedLength = 0;
+                        }
+
+                        BinaryPayload.Write7BitEncodedInt(encodedIds.AsSpan(), ref encodedLength, newId);
+                    }
+
+                    if (encodedLength > 0)
+                    {
+                        compressed.Write(encodedIds, 0, encodedLength);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(encodedIds);
                 }
 
                 await compressed.FlushAsync(cancellationToken);
@@ -124,7 +146,7 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
             : null;
         var payload = (Stream?)body ?? input;
         var count = BinaryPayload.Read7BitEncodedInt(payload);
-        if (count < 0)
+        if (count < 0 || count > 10_000_000)
         {
             throw new InvalidDataException("Invalid dictionary entry count.");
         }
@@ -133,7 +155,7 @@ public sealed class CompressionEngine : ICompressor, IDecompressor
         for (var index = 0; index < count; index++)
         {
             var byteCount = BinaryPayload.Read7BitEncodedInt(payload);
-            if (byteCount < 0)
+            if (byteCount < 0 || byteCount > 64 * 1024 * 1024)
             {
                 throw new InvalidDataException("Invalid dictionary entry length.");
             }
