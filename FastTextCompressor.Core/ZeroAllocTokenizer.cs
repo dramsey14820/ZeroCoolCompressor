@@ -29,6 +29,26 @@ public sealed class ZeroAllocTokenizer
         }
     }
 
+    internal void ProcessStrings(ReadOnlySpan<char> input, bool isFinal, Action<string> handler)
+    {
+        foreach (var character in input)
+        {
+            var isWord = char.IsLetterOrDigit(character);
+            if (_wordToken is not null && _wordToken != isWord)
+            {
+                EmitString(handler);
+            }
+
+            _wordToken ??= isWord;
+            _current.Append(character);
+        }
+
+        if (isFinal)
+        {
+            EmitString(handler);
+        }
+    }
+
     private void Emit(TokenHandler handler)
     {
         if (_current.Length == 0)
@@ -37,6 +57,18 @@ public sealed class ZeroAllocTokenizer
         }
 
         handler(_current.ToString().AsSpan());
+        _current.Clear();
+        _wordToken = null;
+    }
+
+    private void EmitString(Action<string> handler)
+    {
+        if (_current.Length == 0)
+        {
+            return;
+        }
+
+        handler(_current.ToString());
         _current.Clear();
         _wordToken = null;
     }
